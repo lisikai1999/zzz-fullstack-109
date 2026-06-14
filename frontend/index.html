@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Register Allocation Visualizer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Consolas', 'Monaco', monospace; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+header { padding: 10px 16px; background: #16213e; border-bottom: 1px solid #0f3460; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+header h1 { font-size: 15px; color: #4fc3f7; white-space: nowrap; }
+.input-area { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 300px; }
+.input-area textarea { flex: 1; height: 72px; background: #0d1b2a; border: 1px solid #1b3a5c; color: #e0e0e0; padding: 6px 8px; font-family: inherit; font-size: 11px; resize: vertical; border-radius: 4px; }
+.input-area select, .input-area button { height: 32px; padding: 0 12px; border: 1px solid #1b3a5c; background: #0d1b2a; color: #e0e0e0; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.input-area button { background: #0f3460; color: #4fc3f7; font-weight: bold; }
+.input-area button:hover { background: #1a5276; }
+.panels { flex: 1; display: grid; grid-template-columns: 1.2fr 1fr 0.8fr; gap: 1px; background: #0f3460; overflow: hidden; }
+.panel { background: #1a1a2e; display: flex; flex-direction: column; overflow: hidden; }
+.panel-header { padding: 6px 10px; background: #16213e; border-bottom: 1px solid #0f3460; font-size: 12px; font-weight: bold; color: #4fc3f7; display: flex; justify-content: space-between; align-items: center; }
+.panel-body { flex: 1; overflow: auto; position: relative; }
+.panel-body svg { width: 100%; height: 100%; }
+#asm-content { padding: 8px; font-size: 11px; line-height: 1.7; }
+.asm-line { padding: 1px 6px; border-radius: 3px; white-space: pre; cursor: pointer; }
+.asm-line:hover { background: #1b3a5c; }
+.highlighted { background: #4a3800 !important; border-left: 3px solid #ffd700; }
+.cfg-block rect.block-bg { fill: #0d1b2a; stroke: #4fc3f7; stroke-width: 1.5; rx: 5; ry: 5; }
+.cfg-block text { fill: #e0e0e0; font-size: 10px; font-family: 'Consolas', monospace; }
+.cfg-block .block-label { fill: #4fc3f7; font-weight: bold; font-size: 11px; }
+.cfg-block .live-info { fill: #888; font-size: 9px; font-style: italic; }
+.cfg-edge { stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+.cfg-edge.sequential { stroke: #555; }
+.cfg-edge.branch { stroke: #e74c3c; stroke-dasharray: 5 3; }
+.cfg-edge.fallthrough { stroke: #2ecc71; }
+.cfg-edge.jump { stroke: #f39c12; stroke-dasharray: 5 3; }
+.ig-node { cursor: pointer; transition: transform 0.1s; }
+.ig-node circle { stroke-width: 2; transition: all 0.2s; }
+.ig-node text { font-size: 11px; fill: #fff; font-weight: bold; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.ig-node.spilled circle { stroke-dasharray: 4 2; fill: #444 !important; stroke: #888 !important; }
+.ig-node.spilled text { fill: #ccc; }
+.ig-node.selected circle { stroke: #ffd700 !important; stroke-width: 3.5; filter: drop-shadow(0 0 6px #ffd700); }
+.ig-edge { stroke: #444; stroke-width: 1.2; }
+.cfg-instr-text.highlighted { fill: #ffd700 !important; font-weight: bold; }
+.info-badge { background: #0f3460; padding: 2px 6px; border-radius: 8px; font-size: 10px; color: #aaa; font-weight: normal; }
+.error-msg { color: #e74c3c; padding: 16px; font-size: 13px; }
+.du-chain-panel { padding: 8px; font-size: 10px; max-height: 120px; overflow-y: auto; border-top: 1px solid #0f3460; background: #0d1b2a; }
+.du-chain-item { padding: 2px 4px; cursor: pointer; border-radius: 3px; }
+.du-chain-item:hover { background: #1b3a5c; }
+.du-chain-item.highlighted { background: #4a3800; color: #ffd700; }
+.legend { display: flex; gap: 10px; align-items: center; padding: 4px 10px; background: #0d1b2a; border-top: 1px solid #0f3460; font-size: 10px; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 3px; }
+.legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Register Allocation Visualizer</h1>
+  <div class="input-area">
+    <textarea id="tac-input">a = 1
+b = 2
+c = a + b
+d = c * a
+if d < 10 goto L1
+e = d + b
+goto L2
+L1:
+e = c + 1
+L2:
+f = e + a
+return f</textarea>
+    <select id="k-select">
+      <option value="4">K=4</option>
+      <option value="8">K=8</option>
+    </select>
+    <button onclick="compileCode()">Compile</button>
+  </div>
+</header>
+<div class="panels">
+  <div class="panel">
+    <div class="panel-header"><span>Control Flow Graph</span><span class="info-badge" id="cfg-info"></span></div>
+    <div class="panel-body" id="cfg-panel"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><span>Interference Graph</span><span class="info-badge" id="ig-info"></span></div>
+    <div class="panel-body" id="ig-panel"></div>
+    <div class="legend" id="ig-legend"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><span>Assembly</span><span class="info-badge" id="asm-info"></span></div>
+    <div class="panel-body"><div id="asm-content"></div></div>
+    <div class="du-chain-panel" id="du-panel">
+      <div style="color:#4fc3f7;margin-bottom:4px;font-weight:bold;">Def-Use Chains</div>
+      <div id="du-chains-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let compiledData = null;
+let selectedVar = null;
+const colorScale = d3.scaleOrdinal(d3.schemeTableau10);
+
+async function compileCode() {
+  const code = document.getElementById('tac-input').value;
+  const k = parseInt(document.getElementById('k-select').value);
+  try {
+    const resp = await fetch('/api/compile', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code, num_registers: k})
+    });
+    const data = await resp.json();
+    if (!resp.ok) { showError(data.error || 'Compilation failed'); return; }
+    compiledData = data;
+    selectedVar = null;
+    renderAll(data);
+  } catch(e) { showError('Network error: ' + e.message); }
+}
+
+function showError(msg) {
+  document.getElementById('cfg-panel').innerHTML = `<div class="error-msg">${msg}</div>`;
+  document.getElementById('ig-panel').innerHTML = '';
+  document.getElementById('asm-content').innerHTML = '';
+  document.getElementById('du-chains-list').innerHTML = '';
+}
+
+function renderAll(data) {
+  renderCFG(data);
+  renderIG(data);
+  renderASM(data);
+  renderDUChains(data);
+  document.getElementById('cfg-info').textContent = `${data.basic_blocks.length} blocks`;
+  document.getElementById('ig-info').textContent = `${data.interference_graph.nodes.length} vars` + (data.spill_count > 0 ? `, ${data.spill_count} spilled` : '');
+  document.getElementById('asm-info').textContent = `${data.assembly.length} instr`;
+  renderLegend(data);
+}
+
+function renderLegend(data) {
+  const el = document.getElementById('ig-legend');
+  el.innerHTML = '';
+  for (let i = 0; i < data.num_registers; i++) {
+    const item = document.createElement('span');
+    item.className = 'legend-item';
+    item.innerHTML = `<span class="legend-swatch" style="background:${colorScale(i)}"></span>r${i}`;
+    el.appendChild(item);
+  }
+}
+
+// ===== CFG with live variable annotations =====
+function renderCFG(data) {
+  const container = document.getElementById('cfg-panel');
+  container.innerHTML = '';
+  const width = container.clientWidth || 400;
+  const height = container.clientHeight || 500;
+  const svg = d3.select(container).append('svg').attr('width', width).attr('height', height);
+
+  const defs = svg.append('defs');
+  defs.append('marker').attr('id', 'arrowhead').attr('viewBox', '0 0 10 10')
+    .attr('refX', 9).attr('refY', 5).attr('markerWidth', 6).attr('markerHeight', 6)
+    .attr('orient', 'auto')
+    .append('path').attr('d', 'M0,0 L10,5 L0,10 Z').attr('fill', '#999');
+
+  const blocks = data.basic_blocks;
+  const edges = data.cfg_edges;
+  const blockW = 180;
+  const lineH = 14;
+  const padding = 8;
+
+  const depths = computeDepths(blocks);
+  const depthCounts = {};
+  blocks.forEach(b => { const d = depths[b.id]||0; depthCounts[d] = (depthCounts[d]||0)+1; });
+
+  const blockPositions = {};
+  const depthIndex = {};
+  blocks.forEach(b => {
+    const d = depths[b.id] || 0;
+    depthIndex[d] = depthIndex[d] || 0;
+    const count = depthCounts[d];
+    const x = width/2 + (depthIndex[d] - (count-1)/2) * (blockW + 30);
+    // Height: label + live_in + instructions + live_out
+    const numLines = b.instructions_text.length + 3; // label + live_in + live_out
+    const blockH = numLines * lineH + padding * 2;
+    const y = 20 + d * (blockH + 40);
+    blockPositions[b.id] = {x: x - blockW/2, y, w: blockW, h: blockH};
+    depthIndex[d]++;
+  });
+
+  const g = svg.append('g');
+  const zoom = d3.zoom().scaleExtent([0.2, 3]).on('zoom', e => g.attr('transform', e.transform));
+  svg.call(zoom);
+
+  // Auto-fit
+  const allPos = Object.values(blockPositions);
+  const maxY = Math.max(...allPos.map(p => p.y + p.h)) + 40;
+  const maxX = Math.max(...allPos.map(p => p.x + p.w)) + 40;
+  const minX = Math.min(...allPos.map(p => p.x)) - 20;
+  const scale = Math.min(0.95, width / (maxX - minX + 40), height / maxY);
+  svg.call(zoom.transform, d3.zoomIdentity.translate(-minX * scale + 10, 10).scale(scale));
+
+  // Edges
+  edges.forEach(e => {
+    const from = blockPositions[e.from];
+    const to = blockPositions[e.to];
+    if (!from || !to) return;
+    const x1 = from.x + from.w/2, y1 = from.y + from.h;
+    const x2 = to.x + to.w/2, y2 = to.y;
+    if (e.to <= e.from) {
+      // Back edge: draw curved
+      const cp = Math.min(from.x, to.x) - 40;
+      g.append('path')
+        .attr('class', `cfg-edge ${e.type}`)
+        .attr('d', `M${x1},${y1} C${cp},${y1} ${cp},${y2} ${x2},${y2}`);
+    } else {
+      g.append('line').attr('class', `cfg-edge ${e.type}`)
+        .attr('x1', x1).attr('y1', y1).attr('x2', x2).attr('y2', y2);
+    }
+  });
+
+  // Blocks with live variable annotations
+  blocks.forEach(b => {
+    const pos = blockPositions[b.id];
+    const bg = g.append('g').attr('class', 'cfg-block').attr('transform', `translate(${pos.x},${pos.y})`);
+    bg.append('rect').attr('class', 'block-bg').attr('width', pos.w).attr('height', pos.h);
+
+    let yOff = lineH;
+    // Block label
+    bg.append('text').attr('class', 'block-label').attr('x', 6).attr('y', yOff).text(`B${b.id}`);
+    yOff += lineH;
+
+    // Live-in annotation
+    const liveInStr = b.live_in.length > 0 ? `in: {${b.live_in.join(', ')}}` : 'in: {}';
+    bg.append('text').attr('class', 'live-info').attr('x', 6).attr('y', yOff).text(liveInStr);
+    yOff += lineH;
+
+    // Instructions
+    b.instructions_text.forEach((txt, i) => {
+      bg.append('text').attr('class', 'cfg-instr-text')
+        .attr('x', 10).attr('y', yOff)
+        .attr('data-index', b.instruction_indices[i])
+        .text(txt.length > 22 ? txt.substring(0, 22) + '..' : txt);
+      yOff += lineH;
+    });
+
+    // Live-out annotation
+    const liveOutStr = b.live_out.length > 0 ? `out: {${b.live_out.join(', ')}}` : 'out: {}';
+    bg.append('text').attr('class', 'live-info').attr('x', 6).attr('y', yOff).text(liveOutStr);
+  });
+}
+
+function computeDepths(blocks) {
+  const depths = {0: 0};
+  const queue = [0];
+  const visited = new Set([0]);
+  while (queue.length) {
+    const cur = queue.shift();
+    const b = blocks.find(x => x.id === cur);
+    if (!b) continue;
+    b.successors.forEach(s => {
+      if (!visited.has(s)) {
+        visited.add(s);
+        depths[s] = (depths[cur]||0) + 1;
+        queue.push(s);
+      }
+    });
+  }
+  blocks.forEach(b => { if (!(b.id in depths)) depths[b.id] = 0; });
+  return depths;
+}
+
+// ===== Interference Graph =====
+function renderIG(data) {
+  const container = document.getElementById('ig-panel');
+  container.innerHTML = '';
+  const width = container.clientWidth || 400;
+  const height = container.clientHeight || 400;
+  const svg = d3.select(container).append('svg').attr('width', width).attr('height', height);
+
+  const ig = data.interference_graph;
+  const nodes = ig.nodes.map(n => ({...n, id: n.name}));
+  const links = ig.edges.map(e => ({source: e.source, target: e.target}));
+
+  const g = svg.append('g');
+  const zoom = d3.zoom().scaleExtent([0.3, 3]).on('zoom', e => g.attr('transform', e.transform));
+  svg.call(zoom);
+
+  const simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(90).strength(0.8))
+    .force('charge', d3.forceManyBody().strength(-250))
+    .force('center', d3.forceCenter(width/2, height/2))
+    .force('collision', d3.forceCollide(35));
+
+  const link = g.selectAll('.ig-edge').data(links).join('line').attr('class', 'ig-edge');
+
+  const node = g.selectAll('.ig-node').data(nodes).join('g')
+    .attr('class', d => `ig-node ${d.spilled ? 'spilled' : ''}`)
+    .on('click', (event, d) => { event.stopPropagation(); toggleHighlight(d.name); })
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    );
+
+  node.append('circle').attr('r', 22)
+    .attr('fill', d => d.spilled ? '#444' : colorScale(d.color))
+    .attr('stroke', d => d.spilled ? '#888' : d3.color(colorScale(d.color)).darker(0.8));
+
+  node.append('text').text(d => d.name);
+
+  simulation.on('tick', () => {
+    link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    node.attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+}
+
+// ===== Assembly =====
+function renderASM(data) {
+  const container = document.getElementById('asm-content');
+  container.innerHTML = '';
+  data.assembly.forEach((line, i) => {
+    const div = document.createElement('div');
+    div.className = 'asm-line';
+    div.dataset.index = line.source_index;
+    div.dataset.variables = (line.variables || []).join(',');
+    div.textContent = `${String(i).padStart(3)}  ${line.line}`;
+    container.appendChild(div);
+  });
+}
+
+// ===== Def-Use Chains =====
+function renderDUChains(data) {
+  const container = document.getElementById('du-chains-list');
+  container.innerHTML = '';
+  if (!data.liveness || !data.liveness.du_chains) return;
+
+  const chains = data.liveness.du_chains.filter(c => !c.variable.startsWith('_spill'));
+  chains.forEach(chain => {
+    const div = document.createElement('div');
+    div.className = 'du-chain-item';
+    const usesStr = chain.use_indices.map(u => u).join(',');
+    div.textContent = `${chain.variable}: def@${chain.def_index} → use@[${usesStr}]`;
+    div.addEventListener('click', () => {
+      toggleHighlight(chain.variable);
+    });
+    div.addEventListener('mouseenter', () => {
+      if (!selectedVar) highlightDUChain(chain);
+    });
+    div.addEventListener('mouseleave', () => {
+      if (!selectedVar) clearHighlights();
+    });
+    container.appendChild(div);
+  });
+}
+
+function highlightDUChain(chain) {
+  clearHighlights();
+  const indices = new Set([chain.def_index, ...chain.use_indices]);
+  d3.selectAll('.cfg-instr-text')
+    .filter(function() { return indices.has(+this.getAttribute('data-index')); })
+    .classed('highlighted', true);
+  document.querySelectorAll('.asm-line').forEach(el => {
+    if (indices.has(+el.dataset.index)) el.classList.add('highlighted');
+  });
+  document.querySelectorAll('.du-chain-item').forEach(el => {
+    if (el.textContent.startsWith(chain.variable + ':')) el.classList.add('highlighted');
+  });
+}
+
+// ===== Highlighting (three-graph linkage) =====
+function toggleHighlight(varName) {
+  if (selectedVar === varName) { selectedVar = null; clearHighlights(); return; }
+  selectedVar = varName;
+  applyHighlights(varName);
+}
+
+function clearHighlights() {
+  d3.selectAll('.highlighted').classed('highlighted', false);
+  d3.selectAll('.ig-node').classed('selected', false);
+  document.querySelectorAll('.du-chain-item.highlighted').forEach(el => el.classList.remove('highlighted'));
+}
+
+function applyHighlights(varName) {
+  clearHighlights();
+  if (!compiledData) return;
+
+  // IG node
+  d3.selectAll('.ig-node').filter(d => d.name === varName).classed('selected', true);
+
+  // CFG: highlight instructions that def or use this variable
+  const instrIndices = new Set();
+  compiledData.tac_instructions.forEach(instr => {
+    if (instr.dest === varName || instr.arg1 === varName || instr.arg2 === varName) {
+      instrIndices.add(instr.index);
+    }
+  });
+  d3.selectAll('.cfg-instr-text')
+    .filter(function() { return instrIndices.has(+this.getAttribute('data-index')); })
+    .classed('highlighted', true);
+
+  // Assembly: highlight lines involving this variable
+  document.querySelectorAll('.asm-line').forEach(el => {
+    const vars = el.dataset.variables.split(',');
+    if (vars.includes(varName)) el.classList.add('highlighted');
+  });
+
+  // DU chains: highlight chains for this variable
+  document.querySelectorAll('.du-chain-item').forEach(el => {
+    if (el.textContent.startsWith(varName + ':')) el.classList.add('highlighted');
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.ig-node') && !e.target.closest('.du-chain-item')) {
+    selectedVar = null;
+    clearHighlights();
+  }
+});
+
+window.addEventListener('load', () => { compileCode(); });
+</script>
+</body>
+</html>
